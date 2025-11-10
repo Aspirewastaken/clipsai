@@ -4,9 +4,9 @@
  * - Export to Premiere XML
  * - Re-upload edited clips
  */
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { FiUpload, FiDownload, FiCheck, FiX } from 'react-icons/fi';
+import { FiUpload, FiDownload, FiCheck, FiX, FiAlertCircle } from 'react-icons/fi';
 import { motion } from 'framer-motion';
 import axios from 'axios';
 
@@ -14,18 +14,71 @@ interface UploadInterfaceProps {
   onUploadComplete?: (videoId: string) => void;
 }
 
+const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
+const ACCEPTED_VIDEO_TYPES = ['video/mp4', 'video/quicktime', 'video/x-matroska', 'video/x-msvideo'];
+
 export default function UploadInterface({ onUploadComplete }: UploadInterfaceProps) {
   const [uploadedVideo, setUploadedVideo] = useState<any>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [councilStatus, setCouncilStatus] = useState<'idle' | 'processing' | 'complete'>('idle');
   const [clipsFound, setClipsFound] = useState(0);
+  const [error, setError] = useState<string>('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Cleanup polling interval on unmount
+  useEffect(() => {
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+    };
+  }, []);
+
+  // Format file size for display
+  const formatFileSize = (bytes: number): string => {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+  };
 
   // Dropzone for video upload
-  const onDrop = useCallback(async (acceptedFiles: File[]) => {
+  const onDrop = useCallback(async (acceptedFiles: File[], rejectedFiles: any[]) => {
+    setError(''); // Clear previous errors
+
+    // Handle rejected files
+    if (rejectedFiles.length > 0) {
+      const rejection = rejectedFiles[0];
+      if (rejection.errors[0]?.code === 'file-too-large') {
+        setError(`File is too large. Maximum size is ${formatFileSize(MAX_FILE_SIZE)}`);
+      } else if (rejection.errors[0]?.code === 'file-invalid-type') {
+        setError('Invalid file type. Please upload MP4, MOV, MKV, or AVI files.');
+      } else {
+        setError('File upload rejected. Please try again.');
+      }
+      return;
+    }
+
     const file = acceptedFiles[0];
     if (!file) return;
 
+    // Validate file type
+    if (!ACCEPTED_VIDEO_TYPES.includes(file.type)) {
+      setError('Invalid file type. Please upload MP4, MOV, MKV, or AVI files.');
+      return;
+    }
+
+    // Validate file size
+    if (file.size > MAX_FILE_SIZE) {
+      setError(`File is too large (${formatFileSize(file.size)}). Maximum size is ${formatFileSize(MAX_FILE_SIZE)}`);
+      return;
+    }
+
+    setSelectedFile(file);
     setIsUploading(true);
     setUploadProgress(0);
 
@@ -49,8 +102,9 @@ export default function UploadInterface({ onUploadComplete }: UploadInterfacePro
       pollCouncilStatus(response.data.video_id);
 
       onUploadComplete?.(response.data.video_id);
-    } catch (error) {
-      console.error('Upload failed:', error);
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.message || error.message || 'Upload failed. Please try again.';
+      setError(errorMessage);
       setIsUploading(false);
     }
   }, [onUploadComplete]);
@@ -61,11 +115,17 @@ export default function UploadInterface({ onUploadComplete }: UploadInterfacePro
       'video/*': ['.mp4', '.mov', '.mkv', '.avi']
     },
     maxFiles: 1,
+    maxSize: MAX_FILE_SIZE,
   });
 
   // Poll council deliberation status
   const pollCouncilStatus = async (videoId: string) => {
-    const interval = setInterval(async () => {
+    // Clear any existing interval
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+    }
+
+    pollingIntervalRef.current = setInterval(async () => {
       try {
         const response = await axios.get(`/api/phase1/status/${videoId}`);
         const { status, clips_found, progress } = response.data;
@@ -75,11 +135,18 @@ export default function UploadInterface({ onUploadComplete }: UploadInterfacePro
         if (status === 'complete') {
           setCouncilStatus('complete');
           setIsUploading(false);
-          clearInterval(interval);
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current);
+            pollingIntervalRef.current = null;
+          }
         }
-      } catch (error) {
-        console.error('Status check failed:', error);
-        clearInterval(interval);
+      } catch (error: any) {
+        const errorMessage = error.response?.data?.message || 'Failed to check processing status';
+        setError(errorMessage);
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current);
+          pollingIntervalRef.current = null;
+        }
       }
     }, 5000); // Check every 5 seconds
   };
@@ -96,8 +163,9 @@ export default function UploadInterface({ onUploadComplete }: UploadInterfacePro
       // Download XML file
       const downloadUrl = response.data.download_url;
       window.location.href = downloadUrl;
-    } catch (error) {
-      console.error('XML export failed:', error);
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.message || 'XML export failed. Please try again.';
+      setError(errorMessage);
     }
   };
 
@@ -109,17 +177,43 @@ export default function UploadInterface({ onUploadComplete }: UploadInterfacePro
         <p className="text-gray-600 mt-2">Phase 1: Council Deliberation</p>
       </div>
 
+      {/* Error Display */}
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-red-50 border border-red-200 rounded-lg p-4"
+        >
+          <div className="flex items-start space-x-3">
+            <FiAlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <h4 className="font-semibold text-red-900">Error</h4>
+              <p className="text-sm text-red-700 mt-1">{error}</p>
+            </div>
+            <button
+              onClick={() => setError('')}
+              className="text-red-600 hover:text-red-800"
+              aria-label="Dismiss error message"
+            >
+              <FiX className="w-5 h-5" />
+            </button>
+          </div>
+        </motion.div>
+      )}
+
       {/* Upload Area */}
       <div className="bg-white rounded-lg shadow-lg p-6">
         <div
           {...getRootProps()}
+          role="button"
+          aria-label="Upload video file dropzone"
           className={`border-2 border-dashed rounded-lg p-12 text-center cursor-pointer transition-colors ${
             isDragActive
               ? 'border-blue-500 bg-blue-50'
               : 'border-gray-300 hover:border-gray-400'
           }`}
         >
-          <input {...getInputProps()} />
+          <input {...getInputProps()} aria-label="Video file input" />
 
           <FiUpload className="w-16 h-16 mx-auto text-gray-400 mb-4" />
 
@@ -131,11 +225,21 @@ export default function UploadInterface({ onUploadComplete }: UploadInterfacePro
                 Drop video here or click to browse
               </p>
               <p className="text-sm text-gray-500">
-                Supports MP4, MOV, MKV, AVI • Max 2-3 hours
+                Supports MP4, MOV, MKV, AVI • Max {formatFileSize(MAX_FILE_SIZE)}
               </p>
             </div>
           )}
         </div>
+
+        {/* Selected File Info */}
+        {selectedFile && !uploadedVideo && (
+          <div className="mt-4 p-3 bg-gray-50 rounded-lg">
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-700 font-medium">{selectedFile.name}</span>
+              <span className="text-gray-500">{formatFileSize(selectedFile.size)}</span>
+            </div>
+          </div>
+        )}
 
         {/* Upload Progress */}
         {isUploading && (
@@ -226,6 +330,7 @@ export default function UploadInterface({ onUploadComplete }: UploadInterfacePro
 
               <button
                 onClick={exportToXML}
+                aria-label="Export video clips to Premiere Pro XML format"
                 className="w-full flex items-center justify-center space-x-2 px-6 py-3 bg-purple-500 hover:bg-purple-600 text-white font-semibold rounded-lg transition-colors"
               >
                 <FiDownload className="w-5 h-5" />
@@ -245,7 +350,7 @@ export default function UploadInterface({ onUploadComplete }: UploadInterfacePro
             After editing in Premiere Pro, drag and drop your edited clips here.
           </p>
 
-          <ReuploaInterface videoId={uploadedVideo.video_id} />
+          <ReuploadInterface videoId={uploadedVideo.video_id} />
         </div>
       )}
     </div>
@@ -255,8 +360,18 @@ export default function UploadInterface({ onUploadComplete }: UploadInterfacePro
 // Re-upload Component
 function ReuploadInterface({ videoId }: { videoId: string }) {
   const [uploadedClips, setUploadedClips] = useState<File[]>([]);
+  const [error, setError] = useState<string>('');
+  const [isUploading, setIsUploading] = useState(false);
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
+  const onDrop = useCallback((acceptedFiles: File[], rejectedFiles: any[]) => {
+    setError(''); // Clear previous errors
+
+    // Handle rejected files
+    if (rejectedFiles.length > 0) {
+      setError('Some files were rejected. Please upload only MP4 or MOV files.');
+      return;
+    }
+
     setUploadedClips(prev => [...prev, ...acceptedFiles]);
   }, []);
 
@@ -269,6 +384,14 @@ function ReuploadInterface({ videoId }: { videoId: string }) {
   });
 
   const handleReupload = async () => {
+    if (uploadedClips.length === 0) {
+      setError('Please select at least one clip to upload');
+      return;
+    }
+
+    setIsUploading(true);
+    setError('');
+
     const formData = new FormData();
     uploadedClips.forEach(file => {
       formData.append('clips', file);
@@ -280,22 +403,50 @@ function ReuploadInterface({ videoId }: { videoId: string }) {
         formData
       );
 
+      // Success - could navigate or show success message
       console.log('Reupload complete:', response.data);
-      // Navigate to matrix processing
-    } catch (error) {
-      console.error('Reupload failed:', error);
+      setIsUploading(false);
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.message || 'Reupload failed. Please try again.';
+      setError(errorMessage);
+      setIsUploading(false);
     }
   };
 
   return (
     <div>
+      {/* Error Display */}
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4"
+        >
+          <div className="flex items-start space-x-2">
+            <FiAlertCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm text-red-700">{error}</p>
+            </div>
+            <button
+              onClick={() => setError('')}
+              className="text-red-600 hover:text-red-800"
+              aria-label="Dismiss error message"
+            >
+              <FiX className="w-4 h-4" />
+            </button>
+          </div>
+        </motion.div>
+      )}
+
       <div
         {...getRootProps()}
+        role="button"
+        aria-label="Upload edited clips dropzone"
         className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer mb-4 ${
           isDragActive ? 'border-purple-500 bg-purple-50' : 'border-gray-300'
         }`}
       >
-        <input {...getInputProps()} />
+        <input {...getInputProps()} aria-label="Edited clips file input" />
         <p className="text-gray-700">
           {isDragActive ? 'Drop edited clips here...' : 'Drag & drop edited clips (multiple files OK)'}
         </p>
@@ -309,6 +460,7 @@ function ReuploadInterface({ videoId }: { videoId: string }) {
               <button
                 onClick={() => setUploadedClips(prev => prev.filter((_, i) => i !== idx))}
                 className="text-red-500 hover:text-red-700"
+                aria-label={`Remove ${file.name} from upload list`}
               >
                 <FiX />
               </button>
@@ -320,9 +472,15 @@ function ReuploadInterface({ videoId }: { videoId: string }) {
       {uploadedClips.length > 0 && (
         <button
           onClick={handleReupload}
-          className="w-full px-6 py-3 bg-green-500 hover:bg-green-600 text-white font-semibold rounded-lg"
+          disabled={isUploading}
+          aria-label={`Upload ${uploadedClips.length} edited clips`}
+          className={`w-full px-6 py-3 font-semibold rounded-lg transition-colors ${
+            isUploading
+              ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              : 'bg-green-500 hover:bg-green-600 text-white'
+          }`}
         >
-          Upload {uploadedClips.length} Edited Clips
+          {isUploading ? 'Uploading...' : `Upload ${uploadedClips.length} Edited Clips`}
         </button>
       )}
     </div>

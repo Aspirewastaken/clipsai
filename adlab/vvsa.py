@@ -324,6 +324,113 @@ class VVSAScorer:
         ]
 
 
+class HybridScorer:
+    """
+    Hybrid scoring system combining VVSA + Council voting.
+
+    This provides the best of both worlds:
+    - VVSA for fast heuristic + single-model analysis
+    - Council for multi-model consensus on top candidates
+    """
+
+    def __init__(self, vvsa_scorer: VVSAScorer, council_voter=None):
+        """
+        Initialize hybrid scorer.
+
+        Parameters
+        ----------
+        vvsa_scorer : VVSAScorer
+            VVSA scoring instance
+        council_voter : CouncilVoter, optional
+            Council voting instance for multi-model consensus
+        """
+        self.vvsa_scorer = vvsa_scorer
+        self.council_voter = council_voter
+        self.use_council = council_voter is not None
+
+    def score_and_vote(self, clips: List[tuple],
+                      transcription=None,
+                      vvsa_threshold: float = 6.0,
+                      council_top_n: int = 500) -> List[tuple]:
+        """
+        Two-stage scoring: VVSA filtering + Council voting.
+
+        Stage 1: VVSA scores all clips, filters by threshold
+        Stage 2: Council votes on filtered clips, returns top N
+
+        Parameters
+        ----------
+        clips : List[tuple]
+            List of (clip, hook_text) tuples
+        transcription : Transcription, optional
+            Full transcription
+        vvsa_threshold : float
+            Minimum VVSA score to pass to council (default: 6.0)
+        council_top_n : int
+            Number of clips to select via council (default: 500)
+
+        Returns
+        -------
+        List[tuple]
+            Top clips: (clip, vvsa_score, council_vote)
+        """
+        logger.info(f"Hybrid scoring: {len(clips)} clips")
+
+        # Stage 1: VVSA scoring
+        logger.info("Stage 1: VVSA scoring all clips...")
+        vvsa_scored = []
+
+        for clip, hook_text in clips:
+            hook_score = self.vvsa_scorer.score_clip(
+                transcription=transcription,
+                video_path=None,
+                start_time=getattr(clip, 'start_time', 0.0)
+            )
+            vvsa_scored.append((clip, hook_text, hook_score))
+
+        # Filter by VVSA threshold
+        filtered = [(c, t, s) for c, t, s in vvsa_scored
+                   if s.overall_score >= vvsa_threshold]
+
+        logger.info(f"  {len(filtered)}/{len(clips)} clips passed VVSA threshold (>= {vvsa_threshold})")
+
+        if not filtered:
+            logger.warning("No clips passed VVSA filtering!")
+            return []
+
+        # Stage 2: Council voting (if available)
+        if self.use_council:
+            logger.info(f"Stage 2: Council voting on {len(filtered)} clips...")
+
+            # Prepare clips for council
+            council_clips = [(c, t) for c, t, _ in filtered]
+
+            # Get council votes
+            voted = self.council_voter.vote_on_clips(
+                council_clips,
+                transcription=transcription,
+                top_n=council_top_n
+            )
+
+            # Combine VVSA + Council scores
+            # Find VVSA scores for voted clips
+            vvsa_map = {id(c): s for c, _, s in filtered}
+            result = []
+
+            for clip, council_vote in voted:
+                vvsa_score = vvsa_map.get(id(clip))
+                result.append((clip, vvsa_score, council_vote))
+
+            logger.info(f"Final: {len(result)} clips selected by council")
+            return result
+
+        else:
+            # No council - just return VVSA-filtered clips
+            logger.info("Council not available, using VVSA scores only")
+            sorted_clips = sorted(filtered, key=lambda x: x[2].overall_score, reverse=True)
+            return sorted_clips[:council_top_n]
+
+
 def create_scorer(config) -> VVSAScorer:
     """
     Factory function to create VVSA scorer from config.
@@ -359,3 +466,34 @@ def create_scorer(config) -> VVSAScorer:
         hook_duration=config.get("vvsa.hook_duration", 3.0),
         weights=config.get("vvsa.weights")
     )
+
+
+def create_hybrid_scorer(config) -> HybridScorer:
+    """
+    Factory function to create hybrid VVSA + Council scorer.
+
+    Parameters
+    ----------
+    config : Config
+        AdLab configuration
+
+    Returns
+    -------
+    HybridScorer
+        Configured hybrid scorer with VVSA + Council
+    """
+    # Create VVSA scorer
+    vvsa_scorer = create_scorer(config)
+
+    # Create council voter if enabled
+    council_voter = None
+    if config.get("council.enabled", True):
+        try:
+            from .council import create_council_voter
+            council_voter = create_council_voter(config)
+            logger.info("Council voter enabled for hybrid scoring")
+        except Exception as e:
+            logger.warning(f"Could not initialize council voter: {e}")
+            logger.info("Falling back to VVSA-only scoring")
+
+    return HybridScorer(vvsa_scorer, council_voter)

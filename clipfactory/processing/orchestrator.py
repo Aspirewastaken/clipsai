@@ -149,25 +149,165 @@ class ClipFactoryOrchestrator:
         """
         Phase 1: Run council deliberation.
 
-        This would integrate with the existing adlab council system.
-        For now, placeholder.
-        """
-        # TODO: Integrate with adlab council
-        # from adlab.council import run_council
+        Integrates with adlab council voting system:
+        1. Transcribe video
+        2. Find candidate clips (TextTiling)
+        3. VVSA + Council scoring
+        4. Select top 500 clips
 
+        Returns
+        -------
+        List[Dict[str, Any]]
+            Selected clips with scores
+        """
         logger.info("Running council deliberation...")
 
-        # Placeholder: return mock clips
-        return [
-            {
-                "clip_id": f"clip_{i:03d}",
-                "start_time": i * 120.0,
-                "end_time": i * 120.0 + 45.0,
-                "transcript": f"Sample transcript for clip {i}",
-                "hook_score": 7.5 + (i % 3)
-            }
-            for i in range(10)  # Mock 10 clips
-        ]
+        try:
+            # Import adlab components
+            from clipsai import ClipFinder, Transcriber
+            from adlab.config import Config
+            from adlab.vvsa import create_hybrid_scorer
+
+            # Load config
+            config = Config()
+
+            # Step 1: Transcribe video
+            logger.info("Step 1: Transcribing video...")
+            transcriber = Transcriber()
+            transcription = transcriber.transcribe(
+                audio_file_path=video_path,
+                model="large-v3"
+            )
+            logger.info(f"  Transcription complete: {len(transcription.words)} words")
+
+            # Step 2: Find candidate clips using TextTiling
+            logger.info("Step 2: Finding candidate clips...")
+            clip_finder = ClipFinder()
+            base_clips = clip_finder.find_clips(
+                transcription=transcription,
+                min_clips=config.get("processing.target_clips", 300),
+                max_clips=1000,  # Find many candidates for council to vote on
+                min_clip_duration=config.get("processing.min_clip_duration", 10),
+                max_clip_duration=config.get("processing.max_clip_duration", 90)
+            )
+            logger.info(f"  Found {len(base_clips)} candidate clips")
+
+            # Step 3: Extract hook text for each clip
+            logger.info("Step 3: Extracting hook transcripts...")
+            clips_with_hooks = []
+            for clip in base_clips:
+                # Extract first 3 seconds of text
+                hook_text = self._extract_hook_text(transcription, clip.start_time, duration=3.0)
+                clips_with_hooks.append((clip, hook_text))
+
+            # Step 4: VVSA + Council scoring
+            logger.info("Step 4: Council voting (VVSA + Multi-model consensus)...")
+            hybrid_scorer = create_hybrid_scorer(config)
+
+            selected_clips = hybrid_scorer.score_and_vote(
+                clips=clips_with_hooks,
+                transcription=transcription,
+                vvsa_threshold=config.get("vvsa.min_score", 6.0),
+                council_top_n=config.get("processing.max_clips", 500)
+            )
+
+            logger.info(f"  Council selected {len(selected_clips)} clips")
+
+            # Step 5: Convert to output format
+            result_clips = []
+            for i, item in enumerate(selected_clips):
+                # Handle both formats (with or without council vote)
+                if len(item) == 3:
+                    clip, vvsa_score, council_vote = item
+                    consensus_score = council_vote.consensus_score if council_vote else vvsa_score.overall_score
+                else:
+                    clip, hook_text, vvsa_score = item
+                    consensus_score = vvsa_score.overall_score
+
+                result_clips.append({
+                    "clip_id": f"clip_{i:03d}",
+                    "start_time": clip.start_time,
+                    "end_time": clip.end_time,
+                    "duration": clip.end_time - clip.start_time,
+                    "transcript": transcription.get_text(
+                        start_time=clip.start_time,
+                        end_time=clip.end_time
+                    ),
+                    "hook_score": consensus_score,
+                    "vvsa_score": vvsa_score.overall_score if hasattr(vvsa_score, 'overall_score') else vvsa_score,
+                    "council_consensus": consensus_score
+                })
+
+            logger.info(f"Council deliberation complete: {len(result_clips)} clips selected")
+            if result_clips:
+                logger.info(f"  Score range: {result_clips[0]['hook_score']:.2f} - {result_clips[-1]['hook_score']:.2f}")
+
+            return result_clips
+
+        except Exception as e:
+            logger.error(f"Council deliberation failed: {e}")
+            logger.exception(e)
+            # Return empty list on failure
+            return []
+
+    def _extract_hook_text(self, transcription, start_time: float, duration: float = 3.0) -> str:
+        """
+        Extract transcript text for the hook period (first N seconds).
+
+        Parameters
+        ----------
+        transcription : Transcription
+            Full transcription
+        start_time : float
+            Clip start time
+        duration : float
+            Hook duration in seconds
+
+        Returns
+        -------
+        str
+            Hook transcript text
+        """
+        try:
+            hook_end = start_time + duration
+            words = []
+
+            char_info = transcription.get_char_info()
+            current_word = []
+
+            for char_data in char_info:
+                char_start = char_data.get("start_time")
+                char_text = char_data.get("char", "")
+
+                if char_start is None:
+                    current_word.append(char_text)
+                    continue
+
+                if char_start < start_time:
+                    continue
+                if char_start >= hook_end:
+                    break
+
+                if char_text == " ":
+                    if current_word:
+                        words.append("".join(current_word))
+                        current_word = []
+                else:
+                    current_word.append(char_text)
+
+            if current_word:
+                words.append("".join(current_word))
+
+            return " ".join(words)
+
+        except Exception as e:
+            logger.warning(f"Could not extract hook text: {e}")
+            # Fallback: use first 50 chars of full transcript
+            try:
+                full_text = transcription.get_text(start_time=start_time, end_time=start_time + duration)
+                return full_text[:50]
+            except:
+                return ""
 
     async def phase2_premiere_export(
         self,

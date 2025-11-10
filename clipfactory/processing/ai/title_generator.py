@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Optional
 import logging
 import os
 from anthropic import Anthropic
-import openai
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +16,8 @@ class TitleGenerator:
     Generate title variants for viral clips.
 
     Uses:
-    - Claude 4.5 Haiku (cheap, fast)
-    - GPT-5 (high quality variants)
-    - Gemini 2.5 Flash (formatting)
+    - Claude 3.5 Haiku (cheap, fast)
+    - GPT-4 (high quality variants)
     """
 
     def __init__(
@@ -36,9 +35,9 @@ class TitleGenerator:
             self.claude = None
 
         if self.openai_key:
-            openai.api_key = self.openai_key
+            self.openai_client = OpenAI(api_key=self.openai_key)
         else:
-            openai.api_key = None
+            self.openai_client = None
 
     def generate_from_voice(
         self,
@@ -49,7 +48,7 @@ class TitleGenerator:
         """
         Generate title variants from voice dictation.
 
-        Wes speaks the title idea, GPT-5 generates 5 variants.
+        Wes speaks the title idea, GPT-4 generates 5 variants.
 
         Args:
             voice_transcript: What Wes said
@@ -84,10 +83,10 @@ Return as JSON array:
 """
 
         try:
-            if openai.api_key:
-                # Use GPT-5 for high quality
-                response = openai.ChatCompletion.create(
-                    model="gpt-4",  # Will be GPT-5 when available
+            if self.openai_client:
+                # Use GPT-4 for high quality (OpenAI SDK v2.x)
+                response = self.openai_client.chat.completions.create(
+                    model="gpt-4",
                     messages=[
                         {"role": "system", "content": "You are a viral content title expert."},
                         {"role": "user", "content": prompt}
@@ -176,8 +175,9 @@ Return JSON array of title variants.
 
                 content = response.content[0].text
 
-            elif openai.api_key:
-                response = openai.ChatCompletion.create(
+            elif self.openai_client:
+                # OpenAI SDK v2.x
+                response = self.openai_client.chat.completions.create(
                     model="gpt-4",
                     messages=[
                         {"role": "system", "content": "Generate viral video titles."},

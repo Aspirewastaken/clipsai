@@ -241,11 +241,23 @@ class ClipExporter:
             if not video_stream:
                 raise ValueError("No video stream found")
 
+            # Parse frame rate safely without eval()
+            def parse_frame_rate(r_frame_rate: str) -> float:
+                """Safely parse ffprobe r_frame_rate string (e.g., '30000/1001')"""
+                try:
+                    if '/' in r_frame_rate:
+                        num, den = r_frame_rate.split('/')
+                        return float(num) / float(den)
+                    else:
+                        return float(r_frame_rate)
+                except (ValueError, ZeroDivisionError):
+                    return 30.0  # Default fallback
+
             return {
                 "width": int(video_stream.get("width", 0)),
                 "height": int(video_stream.get("height", 0)),
                 "duration": float(data.get("format", {}).get("duration", 0)),
-                "fps": eval(video_stream.get("r_frame_rate", "30/1")),
+                "fps": parse_frame_rate(video_stream.get("r_frame_rate", "30/1")),
                 "codec": video_stream.get("codec_name", "unknown"),
             }
 

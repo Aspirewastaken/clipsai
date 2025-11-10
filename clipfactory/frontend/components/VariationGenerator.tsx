@@ -8,9 +8,9 @@
  * - Real-time preview
  * - Processing animation
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FiMic, FiChevronLeft, FiChevronRight, FiPlay, FiCheck } from 'react-icons/fi';
+import { FiMic, FiChevronLeft, FiChevronRight, FiPlay, FiCheck, FiAlertCircle, FiX } from 'react-icons/fi';
 
 interface MusicTrack {
   id: string;
@@ -42,6 +42,18 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
   const [currentMusicIndex, setCurrentMusicIndex] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [error, setError] = useState<string>('');
+  const progressIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Cleanup interval on unmount
+  useEffect(() => {
+    return () => {
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
+    };
+  }, []);
 
   // Load music tracks
   useEffect(() => {
@@ -51,10 +63,14 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
   const loadMusicTracks = async () => {
     try {
       const response = await fetch('/api/music/list');
+      if (!response.ok) {
+        throw new Error('Failed to load music tracks');
+      }
       const data = await response.json();
       setMusicTracks(data.tracks);
-    } catch (error) {
-      console.error('Failed to load music:', error);
+    } catch (error: any) {
+      const errorMessage = error.message || 'Failed to load music tracks. Please refresh the page.';
+      setError(errorMessage);
     }
   };
 
@@ -88,10 +104,15 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
         })
       });
 
+      if (!response.ok) {
+        throw new Error('Failed to generate title variants');
+      }
+
       const data = await response.json();
       setTitleVariants(data.titles);
-    } catch (error) {
-      console.error('Failed to generate titles:', error);
+    } catch (error: any) {
+      const errorMessage = error.message || 'Failed to generate title variants. Please try again.';
+      setError(errorMessage);
     }
   };
 
@@ -110,6 +131,7 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
 
   // Generate variations
   const handleGenerate = async () => {
+    setError(''); // Clear previous errors
     setIsProcessing(true);
     setProgress(0);
 
@@ -122,11 +144,19 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
       selected_title: titleVariants[0]?.text
     };
 
+    // Clear any existing interval
+    if (progressIntervalRef.current) {
+      clearInterval(progressIntervalRef.current);
+    }
+
     // Simulate progress
-    const interval = setInterval(() => {
+    progressIntervalRef.current = setInterval(() => {
       setProgress(prev => {
         if (prev >= 100) {
-          clearInterval(interval);
+          if (progressIntervalRef.current) {
+            clearInterval(progressIntervalRef.current);
+            progressIntervalRef.current = null;
+          }
           return 100;
         }
         return prev + 5;
@@ -137,15 +167,23 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
       await onGenerate(config);
 
       // Complete
-      clearInterval(interval);
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
       setProgress(100);
 
       // Play sound notification
       playNotificationSound();
 
-    } catch (error) {
-      console.error('Generation failed:', error);
+    } catch (error: any) {
+      const errorMessage = error.message || 'Generation failed. Please try again.';
+      setError(errorMessage);
       setIsProcessing(false);
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current);
+        progressIntervalRef.current = null;
+      }
     }
   };
 
@@ -163,6 +201,30 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
         <p className="text-gray-600 mt-2">Create 9 variations from this clip</p>
       </div>
 
+      {/* Error Display */}
+      {error && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-red-50 border border-red-200 rounded-lg p-4"
+        >
+          <div className="flex items-start space-x-3">
+            <FiAlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <h4 className="font-semibold text-red-900">Error</h4>
+              <p className="text-sm text-red-700 mt-1">{error}</p>
+            </div>
+            <button
+              onClick={() => setError('')}
+              className="text-red-600 hover:text-red-800"
+              aria-label="Dismiss error message"
+            >
+              <FiX className="w-5 h-5" />
+            </button>
+          </div>
+        </motion.div>
+      )}
+
       {/* Voice Input */}
       <div className="bg-white rounded-lg shadow-lg p-6">
         <h3 className="text-xl font-semibold mb-4">Title Input (Voice)</h3>
@@ -170,6 +232,7 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
         <div className="flex items-center space-x-4">
           <button
             onClick={isRecording ? stopRecording : startRecording}
+            aria-label={isRecording ? 'Stop voice recording' : 'Start voice recording'}
             className={`flex items-center space-x-2 px-6 py-3 rounded-lg font-semibold transition-all ${
               isRecording
                 ? 'bg-red-500 hover:bg-red-600 text-white animate-pulse'
@@ -221,6 +284,8 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
         <div className="grid grid-cols-2 gap-4">
           <button
             onClick={() => setSelectedTitleStyle('TT3')}
+            aria-label="Select TikTok Cubed title style"
+            aria-pressed={selectedTitleStyle === 'TT3'}
             className={`p-4 rounded-lg border-2 transition-all ${
               selectedTitleStyle === 'TT3'
                 ? 'border-blue-500 bg-blue-50'
@@ -236,6 +301,8 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
 
           <button
             onClick={() => setSelectedTitleStyle('AdLab')}
+            aria-label="Select AdLab Standard title style"
+            aria-pressed={selectedTitleStyle === 'AdLab'}
             className={`p-4 rounded-lg border-2 transition-all ${
               selectedTitleStyle === 'AdLab'
                 ? 'border-blue-500 bg-blue-50'
@@ -259,6 +326,7 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
           <div className="flex items-center space-x-4">
             <button
               onClick={previousMusic}
+              aria-label="Previous music track"
               className="p-3 rounded-full bg-gray-100 hover:bg-gray-200 transition-colors"
             >
               <FiChevronLeft className="w-6 h-6" />
@@ -270,6 +338,8 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }}
+                role="region"
+                aria-label={`Music track: ${musicTracks[currentMusicIndex]?.name}`}
                 className={`p-6 rounded-lg border-2`}
                 style={{
                   backgroundColor: musicTracks[currentMusicIndex]?.color + '20',
@@ -290,6 +360,7 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
 
             <button
               onClick={nextMusic}
+              aria-label="Next music track"
               className="p-3 rounded-full bg-gray-100 hover:bg-gray-200 transition-colors"
             >
               <FiChevronRight className="w-6 h-6" />
@@ -307,6 +378,7 @@ export default function VariationGenerator({ clipId, onGenerate }: VariationGene
         <button
           onClick={handleGenerate}
           disabled={isProcessing || titleVariants.length === 0}
+          aria-label="Generate 9 video variations"
           className={`w-full py-4 rounded-lg font-bold text-lg transition-all ${
             isProcessing || titleVariants.length === 0
               ? 'bg-gray-300 text-gray-500 cursor-not-allowed'

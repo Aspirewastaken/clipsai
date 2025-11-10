@@ -108,8 +108,22 @@ Be harsh but fair. Most hooks score 3-6. Only exceptional hooks score 8+."""
             response_text = message.content[0].text
             return self._parse_hook_response(response_text)
 
+        except ImportError as e:
+            logger.warning(f"Anthropic library not available: {e}")
+            return self._heuristic_hook_score(transcript)
+        except (KeyError, IndexError, AttributeError) as e:
+            logger.error(f"Failed to parse Claude API response in score_hook: {e}", exc_info=True)
+            return self._heuristic_hook_score(transcript)
         except Exception as e:
-            logger.error(f"Claude API error in score_hook: {e}")
+            logger.error(
+                f"Claude API error in score_hook: {type(e).__name__}",
+                exc_info=True,
+                extra={
+                    "error_type": type(e).__name__,
+                    "transcript_length": len(transcript),
+                    "model": self.model
+                }
+            )
             return self._heuristic_hook_score(transcript)
 
     def generate_titles(self, transcript: str, duration: int,
@@ -177,8 +191,23 @@ Generate {num_variants} diverse variants optimized for A/B testing."""
             response_text = message.content[0].text
             return self._parse_titles_response(response_text, num_variants)
 
+        except ImportError as e:
+            logger.warning(f"Anthropic library not available: {e}")
+            return self._generate_fallback_titles(transcript, num_variants)
+        except (KeyError, IndexError, AttributeError) as e:
+            logger.error(f"Failed to parse Claude API response in generate_titles: {e}", exc_info=True)
+            return self._generate_fallback_titles(transcript, num_variants)
         except Exception as e:
-            logger.error(f"Claude API error in generate_titles: {e}")
+            logger.error(
+                f"Claude API error in generate_titles: {type(e).__name__}",
+                exc_info=True,
+                extra={
+                    "error_type": type(e).__name__,
+                    "transcript_length": len(transcript),
+                    "num_variants": num_variants,
+                    "model": self.model
+                }
+            )
             return self._generate_fallback_titles(transcript, num_variants)
 
     def suggest_tags(self, transcript: str, title: str) -> List[str]:
@@ -225,8 +254,23 @@ Return as comma-separated list."""
             tags = [tag.strip().lstrip('#') for tag in response_text.split(',')]
             return tags[:10]
 
+        except ImportError as e:
+            logger.warning(f"Anthropic library not available: {e}")
+            return self._generate_fallback_tags(transcript)
+        except (KeyError, IndexError, AttributeError) as e:
+            logger.error(f"Failed to parse Claude API response in suggest_tags: {e}", exc_info=True)
+            return self._generate_fallback_tags(transcript)
         except Exception as e:
-            logger.error(f"Claude API error in suggest_tags: {e}")
+            logger.error(
+                f"Claude API error in suggest_tags: {type(e).__name__}",
+                exc_info=True,
+                extra={
+                    "error_type": type(e).__name__,
+                    "transcript_length": len(transcript),
+                    "title": title,
+                    "model": self.model
+                }
+            )
             return self._generate_fallback_tags(transcript)
 
     def _parse_hook_response(self, response: str) -> Dict[str, Any]:
